@@ -123,3 +123,17 @@ test('truncation and provider network failures never return partial success or s
     assert.ok(!response.raw.includes('partial') && !response.raw.includes(KEY));
   }
 });
+
+test('a rate limit forwards only the wait time, never the provider message', async t => {
+  const { request } = await serverFixture(t, { fetchImpl: async () => ({ ok: false, status: 429, headers: { get: name => name === 'retry-after' ? '36.4' : null }, json: async () => ({ error: { message: KEY } }) }) });
+  const response = await request('/api/groq/chat', payload);
+  assert.equal(response.status, 429);
+  assert.equal(response.body.error.code, 'GROQ_RATE_LIMIT');
+  assert.equal(response.body.error.retryAfterSeconds, 37);
+  assert.equal(response.headers['retry-after'], '37');
+  assert.ok(!response.raw.includes(KEY));
+  const noHeader = await serverFixture(t, { fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }) });
+  const plain = await noHeader.request('/api/groq/chat', payload);
+  assert.equal(plain.status, 429);
+  assert.ok(!('retryAfterSeconds' in plain.body.error));
+});

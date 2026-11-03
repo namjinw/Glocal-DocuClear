@@ -152,3 +152,31 @@ test('a repeated quotation is anchored inside its own clause, not rejected as am
   assert.equal(result.highlights[0].type, 'DANGER');
   assert.equal(result.highlights[0].sourceSpans[0].start, clause.start);
 });
+
+const titles = text => dangers(analyzeDocumentOffline(text)).map(h => h.easyText);
+
+test('local analysis flags one-sided payment terms, deferred terms and after-the-fact edits', () => {
+  const found = titles('제1조 변제\n채무자는 채권자가 지정하는 방법으로 변제한다.\n제2조 조건\n구체적인 지급 방법 및 분할 상환 일정은 별도 협의한다.\n제3조 증빙\n거래 내역 관련 자료가 확인되지 않을 경우 당사자의 확인 내용을 우선한다.\n제4조 수정\n실제 거래내역과 차이가 있으면 협의하여 수정한다.');
+  for (const title of ['상대방이 정하는 이행 방법', '핵심 이행 조건의 사후 협의 유보', '주관적 진술의 우선 적용', '거래 내역 사후 수정 가능']) assert.ok(found.includes(title), title);
+});
+
+test('local analysis flags wear-and-tear transfer, high daily penalties and payment-independent rights transfer', () => {
+  assert.ok(titles('제1조 특약\n임차인은 통상적인 마모와 자연 노후화를 포함한 모든 파손에 대해 전액 수리비용을 부담하고 신품으로 원상복구한다.').includes('통상 마모·노후까지 임차인에게 전가'));
+  assert.ok(titles('제1조 지체\n을이 지연하면 지연일수 1일당 총 계약금액의 1.5%에 해당하는 지체상금을 배상한다.').includes('큰 금액 또는 무제한 위약 부담'));
+  assert.ok(titles('제1조 권리\n저작재산권 일체는 검수 및 대금 완납 여부와 무관하게 착수 즉시 갑에게 귀속된다.').includes('대금 지급 전 권리 이전'));
+  assert.ok(titles('제1조 환수\n사업장을 무단 이전하면 기지급된 지원금 전액을 즉시 환수하고 20%의 가산금을 부과한다.').includes('지원금 환수 및 가산금 부과'));
+});
+
+test('local analysis stays quiet on ordinary, balanced clauses', () => {
+  assert.deepEqual([...titles('제1조 지체\n을이 지연하면 지연일수 1일당 계약금액의 0.1%에 해당하는 지체상금을 부담한다.\n제2조 일정\n세부 일정은 양 당사자가 서면으로 합의하여 정한다.\n제3조 복구\n임차인은 고의 또는 과실로 파손한 시설만 원상복구하며 통상적인 마모는 임차인이 부담하지 않는다.\n제4조 수정\n거래내역에 차이가 있으면 쌍방이 서면으로 합의하여 수정한다.')], []);
+});
+
+test('the local result never certifies safety and keeps the reference sample verdicts', () => {
+  const { SAMPLE_DOCUMENTS } = loadTs('src/data/sampleDocuments.ts');
+  for (const doc of SAMPLE_DOCUMENTS) {
+    const local = analyzeDocumentOffline(doc.documentText);
+    assert.notEqual(local.summary.score, '안전');
+    if (doc.id === 'sample-safe-standard') assert.equal(dangers(local).length, 0);
+    else assert.ok(dangers(local).length >= doc.defaultResult.highlights.filter(h => h.type === 'DANGER').length, doc.id);
+  }
+});

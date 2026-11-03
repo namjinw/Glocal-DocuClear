@@ -21,7 +21,7 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function error(res, status, code, message) { send(res, status, { error: { code, message } }); }
+function error(res, status, code, message, extra = {}) { send(res, status, { error: { code, message, ...extra } }); }
 
 function isLocalRequest(req) {
   let host;
@@ -106,7 +106,13 @@ export function createGroqMiddleware({ rootDir, fetchImpl = globalThis.fetch, ge
       if (!response.ok) {
         console.warn(`[DocuClear] Groq 응답 상태 ${response.status}`);
         if (response.status === 401 || response.status === 403) error(res, 401, 'GROQ_KEY_INVALID', 'Groq API 키 또는 모델 사용 권한을 확인해주세요.');
-        else if (response.status === 429) error(res, 429, 'GROQ_RATE_LIMIT', 'Groq 요청 또는 토큰 사용 한도에 도달했습니다. 잠시 후 다시 시도해주세요.');
+        else if (response.status === 429) {
+          // Only the wait time is forwarded; the provider's message and headers are never exposed.
+          const wait = Number(response.headers?.get?.('retry-after'));
+          const retryAfterSeconds = Number.isFinite(wait) && wait > 0 ? Math.ceil(wait) : undefined;
+          if (retryAfterSeconds) res.setHeader('Retry-After', String(retryAfterSeconds));
+          error(res, 429, 'GROQ_RATE_LIMIT', 'Groq 요청 또는 토큰 사용 한도에 도달했습니다. 잠시 후 다시 시도해주세요.', retryAfterSeconds ? { retryAfterSeconds } : {});
+        }
         else if (response.status === 400) error(res, 502, 'GROQ_REQUEST_REJECTED', 'Groq가 분석 요청을 처리하지 못했습니다. 문서 길이 또는 요청 형식을 확인해주세요.');
         else error(res, 502, 'GROQ_UNAVAILABLE', 'Groq 서비스 요청을 완료하지 못했습니다.');
         return;

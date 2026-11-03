@@ -24,7 +24,7 @@ function harness(handler = () => null, options = {}) {
     if (result && result.status) return response(result.data, result.status);
     return response({ content: typeof result === 'string' ? result : JSON.stringify(result), model: options.responseModel || MODEL });
   };
-  return { calls, api: loadTs('src/utils/groq.ts', { fetch: fetchMock, localStorage: { getItem() { throw new Error('No browser storage access allowed'); }, setItem() { throw new Error('No browser storage access allowed'); } } }) };
+  return { calls, api: loadTs('src/utils/groq.ts', { fetch: fetchMock, globals: options.globals, localStorage: { getItem() { throw new Error('No browser storage access allowed'); }, setItem() { throw new Error('No browser storage access allowed'); } } }) };
 }
 function inputOf(body) { return JSON.parse(body.messages[1].content); }
 function factsResponse(body) {
@@ -66,7 +66,8 @@ test('duplicate highlight IDs and unresolved compound links are rejected', () =>
   assert.throws(() => api.cleanAndParseJSON(JSON.stringify(result)), /검증/);
   result.highlights = [highlight('h1', 'c1', '조항 하나')];
   result.compoundRisks = [{ title: '잘못된 연결', reason: '근거 없는 ID', relatedHighlights: ['h1', 'missing'], severity: 'HIGH', riskCategories: ['FINANCIAL_RISK'] }];
-  assert.throws(() => api.cleanAndParseJSON(JSON.stringify(result)), /검증/);
+  const parsed = api.cleanAndParseJSON(JSON.stringify(result));
+  assert.equal(parsed.compoundRisks.length, 0);
 });
 
 test('normal ACTION metadata is not counted as risk and all highlights survive parsing', () => {
@@ -252,4 +253,73 @@ test('validation failures report which check failed', async () => {
   const result = await api.analyzeDocumentWithGroq({ text: fixtureText });
   assert.equal(result.analysis.mode, 'local');
   assert.ok(result.analysis.warnings.some(w => w.includes('인용이 해당 조항 원문과 일치하지 않습니다')));
+});
+
+test('model requests carry only what the model needs; positions and labels are rebuilt locally', async () => {
+  const { api, calls } = harness(body => isFacts(body) ? factsResponse(body) : riskResponse(body, true));
+  const result = await api.analyzeDocumentWithGroq({ text: fixtureText });
+  for (const call of calls.slice(1)) {
+    const input = JSON.parse(JSON.parse(call.init.body).messages[1].content);
+    assert.ok(input.clauses.every(c => Object.keys(c).every(k => ['id', 'text', 'references'].includes(k))));
+  }
+  const riskSchema = JSON.parse(calls[2].init.body).response_format.json_schema.schema;
+  const highlightProps = riskSchema.properties.highlights.items.properties;
+  assert.ok(!('bbox' in highlightProps) && !('clauseRef' in highlightProps));
+  assert.deepEqual(Object.keys(riskSchema.properties.summary.properties), ['score']);
+  assert.equal(result.highlights[0].clauseRef, '제1조 ①');
+});
+
+const instantWait = { setTimeout: fn => { fn(); return 0; } };
+const rateLimited = seconds => ({ status: 429, data: { error: { code: 'GROQ_RATE_LIMIT', message: 'secret-test-token', ...(seconds ? { retryAfterSeconds: seconds } : {}) } } });
+
+test('a per-minute rate limit is waited out and retried instead of dropping to local analysis', async () => {
+  let factCalls = 0;
+  const events = [];
+  const { api, calls } = harness(body => {
+    if (isFacts(body)) return ++factCalls === 1 ? rateLimited(37) : factsResponse(body);
+    return riskResponse(body, true);
+  }, { globals: instantWait });
+  const result = await api.analyzeDocumentWithGroq({ text: fixtureText, onProgress: (percent, message) => events.push({ percent, message }) });
+  assert.equal(result.analysis.mode, 'ai');
+  assert.equal(calls.length, 4); // config, rate-limited facts, facts, risk
+  const waits = events.filter(e => e.message.includes('자동으로 다시 시도'));
+  assert.equal(waits.length, 38); // 37s reported by the provider + 1s margin
+  assert.ok(waits[0].message.includes('38초') && waits.at(-1).message.includes('1초'));
+  assert.ok(waits.every(e => e.percent === 15));
+});
+
+test('a rate limit that will not reset soon or reports no wait time is not retried', async () => {
+  for (const seconds of [3600, undefined]) {
+    const { api, calls } = harness(() => rateLimited(seconds), { globals: instantWait });
+    const result = await api.analyzeDocumentWithGroq({ text: fixtureText });
+    assert.equal(calls.length, 2);
+    assert.equal(result.analysis.mode, 'local');
+    assert.ok(result.analysis.warnings.some(w => w.includes('한도')));
+  }
+});
+
+test('rate limit retries are bounded and then fall back with a limited local result', async () => {
+  const { api, calls } = harness(() => rateLimited(1), { globals: instantWait });
+  const result = await api.analyzeDocumentWithGroq({ text: fixtureText });
+  assert.equal(calls.length, 4); // config + first attempt + two retries
+  assert.equal(result.analysis.mode, 'local');
+  assert.equal(result.analysis.status, 'limited');
+  assert.ok(!JSON.stringify(result).includes('secret-test-token'));
+});
+
+test('a clean AI verdict is downgraded when local rules still see a danger pattern', async () => {
+  const risky = '제1조 지체\n을이 지연하면 지연일수 1일당 총 계약금액의 1.5%에 해당하는 지체상금을 배상한다.';
+  const { api } = harness(body => isFacts(body) ? factsResponse(body) : riskResponse(body));
+  const result = await api.analyzeDocumentWithGroq({ text: risky });
+  assert.equal(result.analysis.mode, 'ai');
+  assert.equal(result.analysis.status, 'limited');
+  assert.notEqual(result.summary.score, '안전');
+  assert.ok(result.analysis.warnings.some(w => w.includes('안전하다고 판단하지 않았습니다')));
+});
+
+test('a clean AI verdict stays complete when local rules find nothing', async () => {
+  const { api } = harness(body => isFacts(body) ? factsResponse(body) : riskResponse(body));
+  const result = await api.analyzeDocumentWithGroq({ text: '제1조 업무\n① 을은 매월 보고서를 제출한다.' });
+  assert.equal(result.analysis.status, 'complete');
+  assert.equal(result.summary.score, '안전');
 });

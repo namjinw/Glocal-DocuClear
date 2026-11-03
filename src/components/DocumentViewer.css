@@ -239,6 +239,10 @@
   cursor: grabbing !important;
 }
 
+.viewer-scroll-area.is-locked {
+  cursor: text;
+}
+
 .viewer-scroll-area.cursor-crosshair {
   cursor: crosshair;
 }
@@ -814,4 +818,37 @@
 @keyframes slideUpTooltip {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+.download-menu-wrap {
+  position: relative;
+}
+
+.download-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 9rem;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+  overflow: hidden;
+}
+
+.download-menu-item {
+  padding: 0.55rem 0.8rem;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 0.8rem;
+  color: #1e293b;
+  cursor: pointer;
+}
+
+.download-menu-item:hover {
+  background: #f1f5f9;
 }

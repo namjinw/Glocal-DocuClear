@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ZoomIn,
   ZoomOut,
@@ -14,10 +14,15 @@ import {
   ChevronRight,
   Edit2,
   Maximize2,
+  Lock,
+  Unlock,
+  Copy,
+  Download,
 } from 'lucide-react';
 import type { HighlightItem, HighlightType, DocumentPage } from '../types';
 import { EditHighlightModal } from './EditHighlightModal';
 import { segmentHighlights } from '../utils/textAnchors';
+import { exportDocument, type ExportFormat } from '../utils/exportDocument';
 import './DocumentViewer.css';
 
 interface DocumentViewerProps {
@@ -57,8 +62,12 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
   // Drag Pan state
   const [isPanning, setIsPanning] = useState(false);
-  const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [initialPan, setInitialPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  // Locked: dragging no longer moves the document, so the original text can be selected and copied.
+  const [isLocked, setIsLocked] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
 
   // Modal State
   const [editingHighlight, setEditingHighlight] = useState<HighlightItem | null>(null);
@@ -145,48 +154,79 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
   // ==============================================================
   // MOUSE WHEEL & DRAG INTERACTION (휠 스크롤 & 마우스 드래그 이동)
   // ==============================================================
-  const handleWheel = (e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
-      // 1. Ctrl + 마우스 휠: 줌 확대 / 축소
+  // React registers wheel listeners as passive, so a native non-passive one is needed to keep the page from scrolling too.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const delta = e.deltaY < 0 ? 12 : -12;
-      setZoomLevel((prev) => Math.min(300, Math.max(40, prev + delta)));
-    } else {
-      // 2. 일반 마우스 휠: 상/하/좌/우 화면 이동 (Shift+휠: 가로 이동)
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl + 마우스 휠: 줌 확대 / 축소
+        const delta = e.deltaY < 0 ? 12 : -12;
+        setZoomLevel((prev) => Math.min(300, Math.max(40, prev + delta)));
+        return;
+      }
+      // 일반 마우스 휠: 상/하 이동 (Shift+휠: 가로 이동)
       const scrollFactor = 0.9;
-      const deltaX = e.shiftKey ? e.deltaY * scrollFactor : (e.deltaX ? e.deltaX * scrollFactor : 0);
+      const deltaX = e.shiftKey ? e.deltaY * scrollFactor : e.deltaX * scrollFactor;
       const deltaY = e.shiftKey ? 0 : e.deltaY * scrollFactor;
+      setPanOffset((prev) => ({ x: prev.x - deltaX, y: prev.y - deltaY }));
+    };
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => container.removeEventListener('wheel', onWheel);
+  }, []);
 
-      setPanOffset((prev) => ({
-        x: prev.x - deltaX,
-        y: prev.y - deltaY,
-      }));
+  const handleCopyText = async () => {
+    try {
+      await navigator.clipboard.writeText(effectiveText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable: the locked view still allows manual selection */
+    }
+  };
+
+  // The file keeps the result view: the same text with the same underlined findings.
+  const handleDownload = async (format: ExportFormat) => {
+    setDownloadMenuOpen(false);
+    setExporting(true);
+    setExportError('');
+    try {
+      await exportDocument(format, {
+        title: documentTitle,
+        segments: anchored.segments.map((segment) => showUnderlines && segment.highlights.length
+          ? { text: segment.text, type: segment.highlights[0].type, count: segment.highlights.length }
+          : { text: segment.text }),
+      });
+    } catch {
+      setExportError('파일을 만들지 못했습니다. 다시 시도해주세요.');
+    } finally {
+      setExporting(false);
     }
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || isLocked) return;
+    e.preventDefault(); // no text selection or native drag while moving the document
     setIsPanning(true);
-    setDragStart({ x: e.clientX, y: e.clientY });
-    setInitialPan({ ...panOffset });
   };
 
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (!isPanning) return;
-      const dx = e.clientX - dragStart.x;
-      const dy = e.clientY - dragStart.y;
-      setPanOffset({
-        x: initialPan.x + dx,
-        y: initialPan.y + dy,
-      });
-    },
-    [isPanning, dragStart, initialPan]
-  );
-
-  const handleMouseUp = () => {
-    setIsPanning(false);
-  };
+  // While dragging, the pointer is locked so the document keeps moving past the screen edge instead of stopping there.
+  useEffect(() => {
+    if (!isPanning) return;
+    const onMove = (e: MouseEvent) => setPanOffset((prev) => ({ x: prev.x + e.movementX, y: prev.y + e.movementY }));
+    const onUp = () => setIsPanning(false);
+    document.body.style.userSelect = 'none';
+    try { Promise.resolve(containerRef.current?.requestPointerLock()).catch(() => undefined); } catch { /* unsupported: the drag still works inside the window */ }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      document.body.style.userSelect = '';
+      if (document.pointerLockElement) document.exitPointerLock();
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isPanning]);
 
   const handleOpenEdit = (item: HighlightItem) => {
     setEditingHighlight(item);
@@ -314,6 +354,41 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
             </button>
           )}
 
+          {/* 고정(드래그 이동 끄기 → 원문 선택·복사) / 복사 / 다운로드 */}
+          <button
+            className={`control-btn ${isLocked ? 'active' : ''}`}
+            onClick={() => setIsLocked(!isLocked)}
+            title={isLocked ? '고정 해제 (드래그로 문서 이동)' : '화면 고정 (드래그로 원문 선택·복사)'}
+            aria-pressed={isLocked}
+          >
+            {isLocked ? <Lock size={14} /> : <Unlock size={14} />}
+            <span>{isLocked ? '고정됨' : '고정'}</span>
+          </button>
+          <button className="control-btn" onClick={handleCopyText} disabled={!effectiveText} title="원문 전체 복사">
+            <Copy size={14} />
+            <span>{copied ? '복사됨' : '원문 복사'}</span>
+          </button>
+          <div className="download-menu-wrap">
+            <button
+              className="control-btn"
+              onClick={() => setDownloadMenuOpen(!downloadMenuOpen)}
+              disabled={!effectiveText || exporting}
+              title="결과 화면 그대로 파일로 다운로드"
+              aria-haspopup="menu"
+              aria-expanded={downloadMenuOpen}
+            >
+              <Download size={14} />
+              <span>{exporting ? '만드는 중…' : '다운로드'}</span>
+            </button>
+            {downloadMenuOpen && (
+              <div className="download-menu" role="menu">
+                {([['pdf', 'PDF (.pdf)'], ['hwpx', '한글 (.hwpx)'], ['docx', 'Word (.docx)']] as const).map(([format, label]) => (
+                  <button key={format} role="menuitem" className="download-menu-item" onClick={() => handleDownload(format)}>{label}</button>
+                ))}
+              </div>
+            )}
+          </div>
+
           {/* 줌 컨트롤 */}
           <div className="zoom-control-group">
             <button className="control-btn" onClick={handleZoomOut} title="축소 (Ctrl+휠)">
@@ -333,6 +408,8 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
         </div>
       </div>
 
+      {exportError && <div className="source-anchor-notice" role="alert">{exportError}</div>}
+
       {viewMode === 'text' && anchored.unmatchedIds.length > 0 && (
         <div className="source-anchor-notice" role="status">
           원문 위치를 확인하지 못한 분석 {anchored.unmatchedIds.length}건은 밑줄로 표시하지 않았습니다.
@@ -342,13 +419,9 @@ export const DocumentViewer: React.FC<DocumentViewerProps> = ({
 
       {/* 뷰어 본문 컨테이너 (마우스 휠 스크롤 및 마우스 드래그 이동) */}
       <div
-        className={`viewer-scroll-area cursor-grab ${isPanning ? 'cursor-grabbing' : ''}`}
+        className={`viewer-scroll-area ${isLocked ? 'is-locked' : 'cursor-grab'} ${isPanning ? 'cursor-grabbing' : ''}`}
         ref={containerRef}
-        onWheel={handleWheel}
         onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
       >
         <div
           className="document-canvas-wrapper"

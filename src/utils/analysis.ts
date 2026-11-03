@@ -19,6 +19,8 @@ export interface ParsedDocument {
 
 const circled = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
 const compact = (text: string) => text.replace(/\s+/g, '');
+export const clauseLabel = (clause?: Pick<DocumentClause, 'articleNumber' | 'paragraph'>) => clause?.articleNumber
+  ? `제${clause.articleNumber}조${clause.paragraph ? ` ${circled[clause.paragraph - 1] || clause.paragraph}` : ''}` : undefined;
 
 /** Preserve original offsets; physical line wrapping is never a semantic boundary. */
 export function parseDocument(text: string): ParsedDocument {
@@ -100,7 +102,8 @@ export function parseDocument(text: string): ParsedDocument {
 type Feature = 'scope' | 'free-work' | 'revisions' | 'acceptance-delay' | 'acceptance-payment' |
   'third-party-payment' | 'withhold' | 'background-ip' | 'rights-transfer' | 'cap' | 'cap-exception' |
   'indirect-loss' | 'termination' | 'exit-charge' | 'noncompete' | 'renewal' | 'renewal-obstacle' |
-  'rate-cut' | 'policy' | 'deemed-consent' | 'evidence' | 'penalty' | 'claim-expiry';
+  'rate-cut' | 'policy' | 'deemed-consent' | 'evidence' | 'penalty' | 'claim-expiry' |
+  'restoration' | 'unilateral-method' | 'deferred-terms' | 'post-adjustment' | 'clawback';
 
 interface Fact {
   clause: DocumentClause;
@@ -133,7 +136,7 @@ function extractFact(clause: DocumentClause, siblings: DocumentClause[]): Fact {
   if (/최종고객|제3자|고객으로부터/.test(s) && /대금|지급/.test(s) && /실제수령|수령한후|지급받은후/.test(s) && !/무관하게|관계없이/.test(s)) features.add('third-party-payment');
   if (/대금|지급/.test(s) && /보류할수있|지급유보|지급을유보/.test(s) && /의심|전액|제한없|제한을두지않|끝날때까지/.test(s)) features.add('withhold');
   if (/권리|지식재산|저작권|귀속|이전대상/.test(s) && /체결전|기존|전부터보유/.test(s) && /포함|이전|귀속/.test(s) && !/제외|포함하지않|이전하지않/.test(s)) features.add('background-ip');
-  if (/권리|지식재산|저작권/.test(s) && /귀속|이전/.test(s) && /생성과동시|지급여부와관계없이|지급여부와무관/.test(s)) features.add('rights-transfer');
+  if (/권리|지식재산|저작(?:재산|인격)?권/.test(s) && /귀속|이전/.test(s) && /생성과동시|(?:지급|완납|검수)(?:및[^,.]{0,6})?여부와(?:관계없이|무관)|(?:지급|완납|검수)여부와(?:관계없이|무관)|착수즉시/.test(s)) features.add('rights-transfer');
   if (/배상|책임/.test(s) && /한도로|한도를|한도는|상한/.test(s) && !/적용하지않|적용하지아니|제외/.test(s)) features.add('cap');
   if (/한도|상한/.test(s) && /적용하지않|적용하지아니|적용을배제/.test(s) && /그밖|기타|모든|일체|계약상의무|납기|품질/.test(s)) features.add('cap-exception');
   if (/간접손해|영업기회상실|예상매출감소|평판저하/.test(s) && /배상|부담/.test(s) && !/배상하지않|책임을지지않|제외/.test(s)) features.add('indirect-loss');
@@ -150,7 +153,15 @@ function extractFact(clause: DocumentClause, siblings: DocumentClause[]): Fact {
   if (/동의한것으로|동의로간주/.test(s) && /이의.*않|업무를계속|침묵|회신.*않/.test(s)) features.add('deemed-consent');
   if (/주관적|진술|구두|확인내용/.test(s) && /우선|증빙없이|증빙보다/.test(s) && !/우선하지않|인정하지않/.test(s)) features.add('evidence');
   if (/위약금|위약벌|지체상금/.test(s) && /전액|무제한|30%|50%|100%|사유불문/.test(s) && !/부과하지않|청구하지않|지급하지않|면제/.test(s)) features.add('penalty');
+  const dailyRate = s.match(/(?:1일당|일|매일)[^%\d]{0,12}?(\d+(?:\.\d+)?)%/);
+  if (/위약금|위약벌|지체상금|지연배상/.test(s) && dailyRate && Number(dailyRate[1]) >= 1 && !/부과하지않|청구하지않|면제/.test(s)) features.add('penalty');
+  if (/위약금|위약벌|지체상금|지연배상/.test(s) && /(?:임대료|월세|차임|대금|보수).{0,10}(?:잔여|남은|전액)|(?:잔여|남은).{0,12}(?:임대료|월세|차임|대금)/.test(s) && /중도해지|해지|퇴실|이탈/.test(s)) features.add('penalty');
   if (/\d+일이내/.test(s) && /청구하지않|청구하지못|기간내/.test(s) && /배상을요구할수없|권리를상실|청구권.*소멸/.test(s + context)) features.add('claim-expiry');
+  if (/원상복구|수리비용|수선비|교체비용/.test(s) && /통상적(?:인)?(?:마모|사용)|자연(?:적)?(?:노후|마모)|노후|소모품|신품/.test(s) && /부담|책임|배상/.test(s) && !/부담하지않|책임을지지않|제외한/.test(s)) features.add('restoration');
+  if (/(?:채권자|갑|회사|발주자|임대인|운영기관)(?:이|가)(?:일방적으로)?(?:지정|정하는|지시)(?:하는)?(?:방법|방식|계좌|시기|기한|일자|조건)/.test(s) && /변제|상환|지급|납부|이행/.test(s)) features.add('unilateral-method');
+  if (/(?:지급|변제|상환|납부|정산|금액|이율|이자|일정|기한|방법)/.test(s) && /별도(?:로)?(?:협의|정|합의)|추후(?:에)?(?:협의|결정|정한|합의)|(?:향후|차후)(?:에)?(?:협의|결정)/.test(s) && !/별도(?:로)?(?:협의|정|합의)(?:하지않|없이)/.test(s) && !/(?:서면|문서)(?:으로)?(?:합의|협의)/.test(s)) features.add('deferred-terms');
+  if (/(?:거래|내역|금액|원금|정산|청구).{0,12}(?:차이|불일치|상이)/.test(s) && /수정|변경|정정|조정/.test(s) && /협의|통보|일방|우선/.test(s) && !/상호서면|쌍방서면|양당사자서면/.test(s)) features.add('post-adjustment');
+  if (/환수|반환(?:청구)?|회수/.test(s) && /전액|즉시|가산금/.test(s) && /지원금|보조금|지급받은|기지급|교부금|지원비/.test(s) && !/환수하지않|반환하지않|면제/.test(s)) features.add('clawback');
   return { clause, features, actor, affectedParty: /을|수급자/.test(s) ? (/수급자/.test(s) ? '수급자' : '을') : undefined };
 }
 
@@ -174,6 +185,11 @@ const rules: Partial<Record<Feature, { title: string; reason: string; categories
   'deemed-consent': { title: '이의 미제기 또는 업무 계속을 동의로 간주', reason: '적극적인 합의 없이 변경에 동의한 것으로 처리될 수 있습니다.', categories: ['MODIFICATION_RISK'], severity: 'MEDIUM' },
   evidence: { title: '주관적 진술의 우선 적용', reason: '객관적 자료보다 진술이나 확인 내용을 우선하면 이행 사실을 다투기 어려워질 수 있습니다.', categories: ['EVIDENCE_RISK'], severity: 'HIGH' },
   penalty: { title: '큰 금액 또는 무제한 위약 부담', reason: '전액·무제한 또는 높은 비율의 위약 부담이 명시되어 손실 규모를 검토해야 합니다.', categories: ['LIABILITY_RISK', 'FINANCIAL_RISK'], severity: 'HIGH' },
+  restoration: { title: '통상 마모·노후까지 임차인에게 전가', reason: '정상적인 사용에 따른 마모나 노후, 소모품 교체까지 전액 부담하도록 하여 원상복구 책임이 지나치게 넓어질 수 있습니다.', categories: ['LIABILITY_RISK', 'FINANCIAL_RISK'], severity: 'HIGH' },
+  'unilateral-method': { title: '상대방이 정하는 이행 방법', reason: '변제·지급 방법이나 시기를 한쪽이 일방적으로 정할 수 있어 이행 조건이 사후에 바뀔 수 있습니다.', categories: ['UNILATERAL_DISCRETION', 'AMBIGUITY'], severity: 'HIGH' },
+  'deferred-terms': { title: '핵심 이행 조건의 사후 협의 유보', reason: '지급 방법·일정 등 핵심 조건이 확정되지 않고 나중에 협의하도록 남겨져 있어 분쟁 시 기준이 불분명합니다.', categories: ['AMBIGUITY'], severity: 'HIGH' },
+  'post-adjustment': { title: '거래 내역 사후 수정 가능', reason: '실제 내역과 차이가 있을 때 협의만으로 수정하도록 하여 기록된 금액·조건이 사후에 바뀔 수 있습니다.', categories: ['MODIFICATION_RISK', 'EVIDENCE_RISK'], severity: 'HIGH' },
+  clawback: { title: '지원금 환수 및 가산금 부과', reason: '위반 시 지급된 지원금 전액 환수나 가산금·참여 제한이 부과될 수 있어 해당 요건과 예외를 사전에 확인해야 합니다.', categories: ['FINANCIAL_RISK', 'LIABILITY_RISK'], severity: 'MEDIUM' },
   'claim-expiry': { title: '단기 청구기간 경과 시 권리 제한', reason: '짧은 기간 내 청구하지 않으면 배상을 요구할 수 없게 되어 권리 행사 기회를 놓칠 수 있습니다.', categories: ['LIABILITY_RISK'], severity: 'HIGH' },
 };
 
@@ -240,6 +256,12 @@ export function analyzeDocumentOffline(text: string): AnalysisResult {
   compound('renewal', 'renewal-obstacle', '자동 갱신과 갱신 거절의 제약', '자동 갱신 조건과 엄격한 거절 방식이 결합하여 의도하지 않은 계약 연장이 발생할 수 있습니다.', ['UNILATERAL_DISCRETION'], true);
   compound('renewal', 'rate-cut', '자동 갱신에 따른 보수 감액', '계약이 자동 갱신되면서 보수가 낮아질 수 있습니다. 갱신 거절 기한과 업무량을 함께 확인해야 합니다.', ['FINANCIAL_RISK'], true);
   compound('policy', 'deemed-consent', '정책 변경과 묵시적 동의의 결합', '한쪽이 변경한 정책에 이의를 제기하지 않거나 업무를 계속하면 동의로 처리되어 별도 합의 없이 조건이 바뀔 수 있습니다.', ['MODIFICATION_RISK', 'UNILATERAL_DISCRETION'], true);
+  compound('restoration', 'penalty', '원상복구 책임 전가와 과다 위약금의 결합', '통상 마모까지 부담시키면서 중도 해지 시 높은 위약금도 부과하여 보증금 반환 전 부담이 크게 늘어날 수 있습니다.', ['LIABILITY_RISK', 'FINANCIAL_RISK'], true);
+  compound('restoration', 'exit-charge', '원상복구 책임 전가와 과다 위약금의 결합', '통상 마모까지 부담시키면서 중도 해지 시 잔여 기간 대금도 부과하여 보증금 반환 전 부담이 크게 늘어날 수 있습니다.', ['LIABILITY_RISK', 'FINANCIAL_RISK'], true);
+  compound('unilateral-method', 'evidence', '지급 조건 불확정과 주관적 증빙 의존의 결합', '이행 방법을 한쪽이 정하고 증빙이 없으면 당사자 진술을 우선하여 채무 내용을 다투기 어려워질 수 있습니다.', ['UNILATERAL_DISCRETION', 'EVIDENCE_RISK']);
+  compound('deferred-terms', 'evidence', '지급 조건 불확정과 주관적 증빙 의존의 결합', '핵심 조건이 확정되지 않았는데 증빙이 없으면 당사자 진술을 우선하여 채무 내용을 다투기 어려워질 수 있습니다.', ['AMBIGUITY', 'EVIDENCE_RISK']);
+  compound('evidence', 'post-adjustment', '거래 진위 불확실과 사후 수정의 결합', '주관적 진술을 우선하면서 거래 내역도 사후에 수정할 수 있어 기록의 신뢰성이 흔들릴 수 있습니다.', ['EVIDENCE_RISK', 'MODIFICATION_RISK']);
+  compound('rights-transfer', 'penalty', '권리 일방 귀속과 과다 지체상금의 결합', '대금 수령과 무관하게 권리가 넘어가는데 지연 시 높은 지체상금까지 공제될 수 있습니다.', ['FINANCIAL_RISK', 'LIABILITY_RISK']);
   const warnings = ['간이 분석은 조항 구조와 알려진 위험 패턴을 검토합니다. 표현이 다르거나 복잡한 예외가 있으면 위험을 놓칠 수 있어 안전을 확정하지 않습니다.'];
   if (parsed.unresolvedReferences.length) warnings.push('본문에 없는 참조 조항이 있어 관련 내용을 확인하지 못했습니다.');
   return recalculateAnalysis({ summary: { score: '판단 보류', bullets: [] }, highlights, compoundRisks, fullDocumentText: text,
